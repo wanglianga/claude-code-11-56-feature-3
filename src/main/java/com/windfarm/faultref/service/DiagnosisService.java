@@ -56,13 +56,15 @@ public class DiagnosisService {
     private final CatalogService catalogService;
     private final ReleaseRepo releases;
     private final MappingService mappingService;
+    private final SubstitutionService substitutionService;
 
     @Value("${app.diagnosis.max-batch-size:5000}")
     private int maxBatchSize;
 
     public DiagnosisService(DiagnosisRepo diagnosis, EvidenceRepo evidence, MappingRepo mappings,
                             ReferenceRepo reference, CatalogRepo catalog, CatalogService catalogService,
-                            ReleaseRepo releases, MappingService mappingService) {
+                            ReleaseRepo releases, MappingService mappingService,
+                            SubstitutionService substitutionService) {
         this.diagnosis = diagnosis;
         this.evidence = evidence;
         this.mappings = mappings;
@@ -71,6 +73,7 @@ public class DiagnosisService {
         this.catalogService = catalogService;
         this.releases = releases;
         this.mappingService = mappingService;
+        this.substitutionService = substitutionService;
     }
 
     // ==================================================================
@@ -791,6 +794,11 @@ public class DiagnosisService {
             Map<String, Object> rel = releases.releaseById(ReferenceRepo.asUuid(run, "release_id")).orElse(Map.of());
             catalogLabel = ReferenceRepo.asString(rel, "catalog_version_label");
             invLabel = ReferenceRepo.asString(rel, "inventory_snapshot_label");
+        }
+        UUID snapshotReleaseId = "SNAPSHOT".equals(ReferenceRepo.asString(run, "mode"))
+                ? ReferenceRepo.asUuid(run, "release_id") : null;
+        for (DiagnosisDtos.Result r : results) {
+            substitutionService.attachHistoricalRecommendations(r.relatedWorkOrders(), snapshotReleaseId);
         }
 
         return new DiagnosisDtos.Run(

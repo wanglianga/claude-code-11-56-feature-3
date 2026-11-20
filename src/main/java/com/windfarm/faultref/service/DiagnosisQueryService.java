@@ -31,10 +31,12 @@ public class DiagnosisQueryService {
     private final CatalogRepo catalog;
     private final ReleaseRepo releases;
     private final DiagnosisService diagnosisService;
+    private final SubstitutionService substitutionService;
 
     public DiagnosisQueryService(DiagnosisRepo diagnosis, EvidenceRepo evidence, MappingRepo mappings,
                                  ReferenceRepo reference, CatalogRepo catalog, ReleaseRepo releases,
-                                 DiagnosisService diagnosisService) {
+                                 DiagnosisService diagnosisService,
+                                 SubstitutionService substitutionService) {
         this.diagnosis = diagnosis;
         this.evidence = evidence;
         this.mappings = mappings;
@@ -42,6 +44,7 @@ public class DiagnosisQueryService {
         this.catalog = catalog;
         this.releases = releases;
         this.diagnosisService = diagnosisService;
+        this.substitutionService = substitutionService;
     }
 
     public List<DiagnosisDtos.RunSummary> listRuns(int limit) {
@@ -263,6 +266,9 @@ public class DiagnosisQueryService {
         runContext.put("pinnedInventorySnapshotId", ReferenceRepo.asUuid(run, "pinned_inventory_snapshot_id"));
 
         List<Map<String, Object>> workOrders = relevantWorkOrders(alarm);
+        UUID runReleaseId = "SNAPSHOT".equals(ReferenceRepo.asString(run, "mode"))
+                ? ReferenceRepo.asUuid(run, "release_id") : null;
+        substitutionService.attachHistoricalRecommendations(workOrders, runReleaseId);
 
         return new DiagnosisDtos.Explain(resultId, alarmId, ReferenceRepo.asString(alarm, "external_id"),
                 ReferenceRepo.asString(result, "unit_code"), ReferenceRepo.asString(result, "status"),

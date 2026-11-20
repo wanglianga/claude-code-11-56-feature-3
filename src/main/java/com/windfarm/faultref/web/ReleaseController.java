@@ -2,6 +2,7 @@ package com.windfarm.faultref.web;
 
 import com.windfarm.faultref.repo.ReferenceRepo;
 import com.windfarm.faultref.repo.ReleaseRepo;
+import com.windfarm.faultref.repo.SubstitutionRepo;
 import com.windfarm.faultref.service.ReleaseService;
 import com.windfarm.faultref.web.dto.ApiRequests;
 import io.swagger.v3.oas.annotations.Operation;
@@ -21,10 +22,13 @@ public class ReleaseController {
 
     private final ReleaseService releases;
     private final ReleaseRepo releaseRepo;
+    private final SubstitutionRepo substitutionRepo;
 
-    public ReleaseController(ReleaseService releases, ReleaseRepo releaseRepo) {
+    public ReleaseController(ReleaseService releases, ReleaseRepo releaseRepo,
+                             SubstitutionRepo substitutionRepo) {
         this.releases = releases;
         this.releaseRepo = releaseRepo;
+        this.substitutionRepo = substitutionRepo;
     }
 
     @Operation(summary = "Create a DRAFT release bound to a PUBLISHED catalog version and inventory snapshot")
@@ -78,6 +82,10 @@ public class ReleaseController {
         out.put("inventory", releaseRepo.inventory(id));
         out.put("dispositions", releaseRepo.dispositions(id));
         out.put("adjudications", releaseRepo.adjudications(id));
+        out.put("substitutions", substitutionRepo.releaseSubstitutions(id));
+        out.put("partLifecycle", substitutionRepo.releaseLifecycle(id));
+        out.put("workOrderRecommendations", substitutionRepo.releaseRecommendations(id));
+        out.put("stockContentions", substitutionRepo.releaseContentions(id));
         return out;
     }
 

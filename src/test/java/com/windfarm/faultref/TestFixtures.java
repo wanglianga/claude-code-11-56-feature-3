@@ -7,10 +7,12 @@ import com.windfarm.faultref.service.EvidenceService;
 import com.windfarm.faultref.service.MappingService;
 import com.windfarm.faultref.service.ReferenceService;
 import com.windfarm.faultref.service.ReleaseService;
+import com.windfarm.faultref.service.SubstitutionService;
 import com.windfarm.faultref.web.dto.ApiRequests;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -36,6 +38,10 @@ public class TestFixtures {
     private EvidenceService evidence;
     @Autowired
     private ReleaseService releases;
+    @Autowired
+    private SubstitutionService substitutions;
+    @Autowired
+    private NamedParameterJdbcTemplate jdbc;
 
     @PostConstruct
     void assertWiring() {
@@ -168,5 +174,60 @@ public class TestFixtures {
 
     public ReleaseService releaseService() {
         return releases;
+    }
+
+    // ---- substitution graph fixtures -----------------------------------
+
+    public void publishCatalog(String label) {
+        jdbc.getJdbcTemplate().execute(
+                "update catalog_version set status='PUBLISHED', published_at=now(), approved_by='approver' "
+                        + "where version_label='" + label + "'");
+    }
+
+    public void lifecycle(String catalogLabel, String partNumber, String state, String reason,
+                          String successor) {
+        substitutions.createLifecycle(new ApiRequests.PartLifecycleCreate(catalogLabel, partNumber,
+                state, reason, successor, "approver", "MOC-LC-" + partNumber));
+    }
+
+    public java.util.UUID substitution(String catalogLabel, String from, String to, String kind,
+                                       String modelCode, java.math.BigDecimal tempMin,
+                                       java.math.BigDecimal tempMax, String interfaceRequirement,
+                                       boolean confirm) {
+        Map<String, Object> out = substitutions.createSubstitution(new ApiRequests.SubstitutionCreate(
+                catalogLabel, from, to, kind, modelCode, tempMin, tempMax, interfaceRequirement,
+                confirm, Instant.parse("2025-01-01T00:00:00Z"), null,
+                "MOC-SUB-" + from + "-" + to, "approver", null));
+        return (java.util.UUID) out.get("id");
+    }
+
+    public void contention(String inventoryLabel, String part, String status, String demand) {
+        substitutions.recordContention(new ApiRequests.StockContentionCreate(inventoryLabel, part,
+                "W1", status, demand, "warehouse", null), "tester");
+    }
+
+    public String workOrder(String externalId, String unitCode) {
+        evidence.ingestWorkOrder(new EvidenceService.NewWorkOrder(externalId, unitCode, "vendor",
+                "term", null, Instant.parse("2023-05-10T00:00:00Z"),
+                Instant.parse("2023-05-15T00:00:00Z"), "CLOSED", "symptom", Map.of()));
+        return externalId;
+    }
+
+    public void recommendation(String workOrderExternalId, String concept, String part,
+                               String catalogLabel, String status) {
+        substitutions.recordRecommendation(new ApiRequests.WorkOrderRecommendationCreate(
+                workOrderExternalId, concept, part, "DISP-" + part, catalogLabel, 1,
+                status, "fixture reason", "tester", "MOC-REC-" + part), "tester");
+    }
+
+    public Map<String, Object> alarmWithAttributes(String externalId, String unit, String system, String code,
+                                                   String occurredAt, Map<String, Object> attributes) {
+        return evidence.ingestAlarm(new EvidenceService.NewAlarm(externalId, unit, system, code,
+                null, null, null, Instant.parse(occurredAt), Instant.parse(occurredAt).plusSeconds(10),
+                "REALTIME", attributes, null));
+    }
+
+    public SubstitutionService substitutionService() {
+        return substitutions;
     }
 }

@@ -31,6 +31,19 @@
 
 诊断结论状态：`RESOLVED` / `CONFLICT` / `PENDING_ENGINEER` / `NO_MAPPING` / `NO_DISPOSITION`。
 
+7. **停用备件的替代链沿图前向搜索，历史与当前建议严格分时**：旧齿轮箱 `GBX-100` 停用后，目录给出两条替代——
+   `GBX-200`（仅低温机组可用，温度区间外硬失败）与 `GBX-300`（需把 IF-A 接口改装为 IF-B，恒为待工程确认）。
+   系统**沿备件替代图从历史建议逐边前向搜索**，逐边校验机型、温度、接口、有效期与库存，并返回完整路径；
+   不预计算概念→备件闭包，适配目录频繁变动（取舍见第 7 节）。
+   - **历史不倒灌**：历史工单当时的推荐存在不可变的 `work_order_part_recommendation`，当前可执行替代是独立对象，
+     永远不会回写历史。
+   - **循环即冲突**：`GBX-400 ↔ GBX-500` 互相指向时返回 `CYCLE` 冲突路径（如 `GBX-400 -> GBX-500 -> GBX-400`），不静默选边。
+   - **库存竞争归仓储**：`CLAIM_PENDING` 时诊断只把建议标为 `PENDING_CONFIRM`；仓储 `CONFIRMED_ALLOCATED` 后
+     该建议才 `BLOCKED`，诊断自身从不做库存划拨决定。
+   - **温度缺失是显式边界**：替代边带温度条件而现场未提供环境温度时，边失败原因为 `AMBIENT_TEMP_MISSING`，
+     同时进入概念级 `notSubstitutableReasons`，不猜温度。
+   - 路径状态：`EXECUTABLE`（当前可领用）/ `PENDING_CONFIRM`（待工程或仓储确认）/ `BLOCKED`（不可替代，附原因）/ `CYCLE`（循环冲突）。
+
 ---
 
 ## 2. 快速启动
@@ -92,6 +105,15 @@ DB_URL=jdbc:postgresql://127.0.0.1:5432/faultref \
 - **目录演化**：`CAT-2023.01 → CAT-2025.01 → CAT-2025.02`，配合 `INV-*` 库存快照，
   使同一概念在不同时点分别得到"确认可用 / 互斥待裁定 / 无可用件"。
 - **发布快照**：`REL-2025.01`、`REL-2025.02` 冻结全量内容并带 SHA-256 内容哈希。
+- **齿轮箱替代链验收集**（`GEARBOX_REPLACEMENT` 概念 + `GBX-*` 零件族）：
+  - `GBX-100` 在 `CAT-2025.02` 显式 `OBSOLETE`（`part_lifecycle` 记录停用原因与指定后继 `GBX-200`）。
+  - 替代边：`GBX-100→GBX-200`（CONDITIONAL，环境温度 ≤ -10°C）、`GBX-100→GBX-300`（RETROFIT，IF-B 接口 + 工程确认）、
+    `GBX-100→GBX-600`（常温通用）、`GBX-100→GBX-400→GBX-500→GBX-400`（目录维护错误造成的循环）。
+  - 三条齿轮箱告警：`ALT-NW-A01-20250620-GBX`（-25°C 低温）、`ALT-NW-A02-20250621-GBX`（18°C 温暖）、
+    `ALT-NW-A02-20250622-GBX`（温度属性缺失）。
+  - 历史工单 `WO-2023-0510-NW` 保留 2023 年当时的 `GBX-100` 推荐（ISSUED，CAT-2023.01）。
+  - 库存争用：`INV-2025-05-10` 对最后一台 `GBX-600` 记 `CLAIM_PENDING`；`INV-2025-06-01` 仓储确认
+    `CONFIRMED_ALLOCATED` 给竞争工单 `WO-2025-0520-NW`。
 
 ---
 
@@ -105,7 +127,7 @@ createdb -h 127.0.0.1 -U ccdev faultref_test
 /opt/maven/bin/mvn test
 ```
 
-覆盖 24 个用例：
+覆盖 31 个用例：
 
 - `DiagnosisScenarioTest`（10）：固件改义、离线补传、迟到但非补传、保留冲突、作用域优先、
   工程师裁定、互斥处置、库存不足、运行期目录固定、同码不同机型。
@@ -113,17 +135,22 @@ createdb -h 127.0.0.1 -U ccdev faultref_test
   模式/口径校验、内容哈希确定性、发布后禁止再改目录。
 - `ApiContractTest`（8）：未认证 401、角色 403、校验错误结构、OpenAPI 公开、
   HTTP 运行诊断、补传时间校验。
+- `SubstitutionScenarioTest`（7）：停用型号的低温/改装双替代、温暖环境低温边失败、
+  温度缺失显式边界、替代循环冲突路径、库存争用（CLAIM_PENDING 只标记 / CONFIRMED_ALLOCATED 阻断）、
+  历史工单推荐不可变且与当前替代分离、release 冻结表上的 SNAPSHOT 替代复演。
 
 ### 5.2 端到端脚本（对着已启动的服务）
 
 ```bash
-./scripts/verify.sh          # 30 项断言
+./scripts/verify.sh                       # 30 项断言（基线诊断/映射/发布能力）
+./scripts/verify-substitution.sh          # 21 项断言（备件替代链验收集）
 # 或指定地址
-BASE_URL=http://127.0.0.1:8080 ./scripts/verify.sh
+BASE_URL=http://127.0.0.1:8080 ./scripts/verify-substitution.sh
 ```
 
 覆盖：健康/OpenAPI、鉴权与角色、两类机型、同码改义、发生时点语义、保留冲突、可追溯性、
-处置边界、目录固定、发布冻结与哈希、统计口径。
+处置边界、目录固定、发布冻结与哈希、统计口径；以及停用型号、温度条件缺失、循环替代、
+最后库存争用、历史工单推荐保留与 release 冻结复演。
 
 ---
 
@@ -183,7 +210,47 @@ GET  /api/releases | /{label} | /{label}/content
 POST /api/releases/{label}/retire
 ```
 
-### 6.1 诊断运行示例
+**备件替代链（本次新增）**
+```
+POST /api/substitutions/edges                              新建带条件的替代边（仅 DRAFT 目录）
+POST /api/substitutions/edges/{id}/retract                 撤回替代边（历史行保留）
+GET  /api/substitutions/catalogs/{label}/edges             某目录的替代边
+POST /api/substitutions/part-lifecycle                     零件停用/在役生命周期（OBSOLETE 需原因）
+GET  /api/substitutions/catalogs/{label}/part-lifecycle
+POST /api/substitutions/work-order-recommendations         记录历史工单的不可变推荐
+GET  /api/substitutions/work-order-recommendations
+POST /api/substitutions/stock-contentions                  仓储库存争用（CLAIM_PENDING/CONFIRMED_ALLOCATED/RELEASED）
+GET  /api/substitutions/inventory-snapshots/{label}/stock-contentions
+POST /api/substitutions/advice                             按设备/环境/工单时间/库存时点给出建议
+GET  /api/substitutions/diagnosis/results/{id}/part-advice 某诊断结果各概念的备件建议
+```
+
+### 6.1 备件替代建议示例
+
+```bash
+# 低温机组：GBX-200 可执行、GBX-300 待工程确认、GBX-600 因仓储划拨阻断、GBX-400/500 循环冲突
+curl -u engineer:engineer123 -X POST localhost:8080/api/substitutions/advice \
+  -H 'Content-Type: application/json' -d '{
+    "conceptCode":"GEARBOX_REPLACEMENT",
+    "alarmExternalId":"ALT-NW-A01-20250620-GBX",
+    "catalogVersionLabel":"CAT-2025.02",
+    "inventorySnapshotLabel":"INV-2025-06-01"}'
+
+# 历史工单视角：originalRecommendation 保留 2023 年的 GBX-100，currentAdvice 是今天的可执行替代
+curl -u engineer:engineer123 -X POST localhost:8080/api/substitutions/advice \
+  -H 'Content-Type: application/json' -d '{
+    "conceptCode":"GEARBOX_REPLACEMENT",
+    "workOrderExternalId":"WO-2023-0510-NW","unitCode":"NW-A01",
+    "ambientTempC":-25,"interfaceCode":"IF-A",
+    "occurredAt":"2023-05-10T00:00:00Z",
+    "catalogVersionLabel":"CAT-2025.02",
+    "inventorySnapshotLabel":"INV-2025-06-01"}'
+```
+
+请求中的四个时间/身份轴都是显式的：设备（`unitCode`/告警）、环境（`ambientTempC`、`interfaceCode`）、
+工单时间（`occurredAt`，决定历史解释时点；替代边有效期按当前评估时点校验）、库存时点（库存快照标签）。
+
+### 6.2 诊断运行示例
 
 ```bash
 # 断言模式，按“最新已发布目录”评估所有告警
@@ -218,6 +285,18 @@ curl -u engineer:engineer123 -X POST localhost:8080/api/diagnosis/runs \
 
 具体选择由**目录修订频率、诊断吞吐、审计复演需求**共同决定，服务不强制其一，也不只保留当前码表。
 
+### 7.1 备件替代：沿图前向搜索 vs 预计算闭包
+
+| 方案 | 本服务的选择 | 代价 |
+| --- | --- | --- |
+| **沿替代图前向搜索**（采用） | 边显式存储，查询时从历史建议逐边校验机型/温度/接口/有效期/库存，DFS 返回完整路径与循环冲突 | 循环与分支多时单次查询成本较高（实现中有深度封顶 `MAX_DEPTH=10`） |
+| **发布时预计算概念→兼容备件闭包及条件索引** | 未采用 | 现场查询快，但库存或兼容规则修订时需失效和重建大量闭包结果，且难以原样展示替代路径 |
+
+本场景目录频繁变动且要求逐边可解释，因此选前向搜索；边条件与每条 `EdgeCheck` 结果都随路径返回，解释深度完整。
+无论哪种方案，都必须在**当前固定的目录+库存条件下**产生可执行建议——系统不会把某条边/某个零件固定为
+“历史用途”、另一个固定为“当前用途”：历史用途由不可变的工单推荐表承载，当前用途由每次查询的快照求值承载，
+两者是不同对象而非零件的固有标签。
+
 ---
 
 ## 8. 目录结构
@@ -226,13 +305,17 @@ curl -u engineer:engineer123 -X POST localhost:8080/api/diagnosis/runs \
 src/main/java/com/windfarm/faultref/
   config/      SecurityConfig, OpenApiConfig
   domain/      (schema-first；实体以 SQL 表为准)
-  repo/        ReferenceRepo, MappingRepo, CatalogRepo, EvidenceRepo, ReleaseRepo, DiagnosisRepo, Sql
+  repo/        ReferenceRepo, MappingRepo, CatalogRepo, EvidenceRepo, ReleaseRepo,
+               DiagnosisRepo, SubstitutionRepo, Sql
   service/     ReferenceService, MappingService, CatalogService/CatalogAdminService,
-               EvidenceService, DiagnosisService (引擎), DiagnosisQueryService (统计/差异/解释), ReleaseService
+               EvidenceService, DiagnosisService (引擎), DiagnosisQueryService (统计/差异/解释),
+               ReleaseService, SubstitutionService (替代图遍历与分时建议)
   seed/        DemoDataSeeder（可复现的演示数据与预置运行）
-  web/         6 个 REST 控制器 + dto/
-src/main/resources/db/migration/V1__schema.sql   Flyway 建表
-scripts/verify.sh                                端到端验证（30 项）
+  web/         7 个 REST 控制器 + dto/（含 SubstitutionController、SubstitutionDtos）
+src/main/resources/db/migration/V1__schema.sql                 Flyway 基础建表
+src/main/resources/db/migration/V2__substitution_chain.sql     替代边/生命周期/历史推荐/库存争用/发布冻结表
+scripts/verify.sh                                端到端验证（30 项，基线能力）
+scripts/verify-substitution.sh                  端到端验证（21 项，备件替代链）
 Dockerfile / docker-compose.yml                  一键启动
 ```
 
@@ -240,10 +323,23 @@ Dockerfile / docker-compose.yml                  一键启动
 
 ## 9. 已执行的验证结论（如实记录）
 
-- `mvn test`：24/24 通过（`DiagnosisScenarioTest` 10、`ReleaseSnapshotTest` 6、`ApiContractTest` 8），运行于独立库 `faultref_test`。
-- `./scripts/verify.sh`：30/30 通过（对着本地启动的服务）。
-- `mvn package` 产出的 `faultref-1.0.0.jar` 也曾以 `java -jar` 方式启动并跑通同一套 30 项验证。
-- Docker / Docker Compose 未在本容器内执行（容器无 Docker daemon）；`Dockerfile` 与 `docker-compose.yml` 已提供，构建逻辑为 `mvn package` + Temurin 21 JRE 运行。
-- 手工确认的关键输出：`HYD-201` 在 V2.1 解析为 `HYD_PUMP_WEAR`、V1.0 解析为 `HYD_LOW_PRESSURE`；
+- `mvn test`：31/31 通过（`DiagnosisScenarioTest` 10、`ReleaseSnapshotTest` 6、`ApiContractTest` 8、
+  `SubstitutionScenarioTest` 7），运行于独立库 `faultref_test`，Flyway 从 V1、V2 两个迁移全新建表。
+- `./scripts/verify.sh`：30/30 通过（对着本地启动的服务，基线能力无回归）。
+- `./scripts/verify-substitution.sh`：21/21 通过（对着同一服务，覆盖停用型号、温度缺失、循环、
+  库存争用、历史推荐保留、release 冻结与 SNAPSHOT 复演）。
+- 手工 curl 复核的关键输出：
+  - 低温告警（-25°C）下 `GBX-200` 为 `EXECUTABLE`、`GBX-300` 为 `PENDING_CONFIRM`（IF-B 改装 + 工程确认）、
+    `GBX-600` 因仓储 `CONFIRMED_ALLOCATED` 为 `BLOCKED`，并返回 `GBX-400→GBX-500→GBX-400` 的 `CYCLE` 冲突路径；
+  - 18°C 温暖环境下 `GBX-200` 边失败 `TEMP_ABOVE_MAXIMUM`；温度属性缺失时失败 `AMBIENT_TEMP_MISSING`
+    且进入概念级 `notSubstitutableReasons`；
+  - `INV-2025-05-10` 的 `CLAIM_PENDING` 只把 `GBX-600` 标为 `PENDING_CONFIRM`，仓储确认后才阻断；
+  - 历史工单 `WO-2023-0510-NW` 的 `originalRecommendation` 仍是 2023 年 `GBX-100`（CAT-2023.01，ISSUED），
+    当前替代在独立的 `currentAdvice` 中，未回写历史；
+  - `REL-2025.02` 冻结了 6 条替代边、`GBX-100` 停用事实、历史推荐与库存争用，SNAPSHOT 诊断结果的
+    part-advice 仅读 `release_*` 表即可复演；OpenAPI 3 文档包含全部 10 个新端点。
+- Docker / Docker Compose 未在本容器内执行（容器无 Docker daemon）；`Dockerfile` 与 `docker-compose.yml`
+  已提供且无需修改即可构建（V2 迁移随应用启动自动执行、演示数据自动播种），构建逻辑为 `mvn package` + Temurin 21 JRE 运行。
+- 基线既有的关键输出仍成立：`HYD-201` 在 V2.1 解析为 `HYD_PUMP_WEAR`、V1.0 解析为 `HYD_LOW_PRESSURE`；
   2024 补传告警在 `AS_OF` 复演中仍为 `HYD_LOW_PRESSURE`；`振动超限` 在 `HX-6` 为 `CONFLICT`、
   在 `NW-8` 经裁定为 `GEARBOX_VIBRATION_HIGH`；2025-06 双泵库存下结论为 `PENDING_ENGINEER`。

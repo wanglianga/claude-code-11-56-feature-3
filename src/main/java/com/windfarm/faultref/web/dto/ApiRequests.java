@@ -4,6 +4,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -223,5 +224,75 @@ public final class ApiRequests {
     }
 
     public record ReleasePublish(@NotBlank String approvedBy, @NotBlank String approvalRef) {
+    }
+
+    // ---- spare-part substitution graph ---------------------------------
+
+    public record SubstitutionCreate(
+            @NotBlank String catalogVersionLabel,
+            @NotBlank String fromPartNumber,
+            @NotBlank String toPartNumber,
+            @NotBlank @Pattern(regexp = "DIRECT|CONDITIONAL|RETROFIT") String substitutionKind,
+            String modelCode,
+            BigDecimal tempMinC,
+            BigDecimal tempMaxC,
+            String interfaceRequirement,
+            Boolean requiresEngineeringConfirm,
+            Instant validFrom,
+            Instant validTo,
+            String approvalRef,
+            String approvedBy,
+            String notes) {
+    }
+
+    public record PartLifecycleCreate(
+            @NotBlank String catalogVersionLabel,
+            @NotBlank String partNumber,
+            @NotBlank @Pattern(regexp = "ACTIVE|OBSOLETE") String state,
+            String obsoleteReason,
+            String supersededByPartNumber,
+            String approvedBy,
+            String approvalRef) {
+    }
+
+    public record WorkOrderRecommendationCreate(
+            @NotBlank String workOrderExternalId,
+            String conceptCode,
+            String partNumber,
+            String dispositionCode,
+            String catalogVersionLabel,
+            Integer quantity,
+            @NotBlank @Pattern(regexp = "RECOMMENDED|ISSUED|NOT_AVAILABLE|SUBSTITUTED") String recommendationStatus,
+            String reason,
+            String recordedBy,
+            String approvalRef) {
+    }
+
+    public record StockContentionCreate(
+            @NotBlank String inventorySnapshotLabel,
+            @NotBlank String partNumber,
+            String warehouse,
+            @NotBlank @Pattern(regexp = "CLAIM_PENDING|CONFIRMED_ALLOCATED|RELEASED") String status,
+            @NotBlank String competingDemand,
+            String confirmedBy,
+            String notes) {
+    }
+
+    /**
+     * On-demand advice request. The four time/identity axes are explicit:
+     * device (unit), environment (ambient temp + interface), work-order time
+     * (occurredAt / workOrderExternalId) and inventory point (snapshot label,
+     * or the snapshot effective at the evaluation time).
+     */
+    public record SubstitutionAdviceRequest(
+            String conceptCode,
+            String workOrderExternalId,
+            String alarmExternalId,
+            String unitCode,
+            BigDecimal ambientTempC,
+            String interfaceCode,
+            Instant occurredAt,
+            String catalogVersionLabel,
+            String inventorySnapshotLabel) {
     }
 }

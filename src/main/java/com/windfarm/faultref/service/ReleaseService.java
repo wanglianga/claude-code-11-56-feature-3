@@ -6,6 +6,7 @@ import com.windfarm.faultref.repo.CatalogRepo;
 import com.windfarm.faultref.repo.ReferenceRepo;
 import com.windfarm.faultref.repo.ReleaseRepo;
 import com.windfarm.faultref.repo.Sql;
+import com.windfarm.faultref.repo.SubstitutionRepo;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 import org.springframework.stereotype.Service;
@@ -41,12 +42,15 @@ public class ReleaseService {
     private final ReleaseRepo releases;
     private final ReferenceRepo reference;
     private final CatalogRepo catalog;
+    private final SubstitutionRepo substitutions;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public ReleaseService(ReleaseRepo releases, ReferenceRepo reference, CatalogRepo catalog) {
+    public ReleaseService(ReleaseRepo releases, ReferenceRepo reference, CatalogRepo catalog,
+                          SubstitutionRepo substitutions) {
         this.releases = releases;
         this.reference = reference;
         this.catalog = catalog;
+        this.substitutions = substitutions;
     }
 
     @Transactional
@@ -173,6 +177,9 @@ public class ReleaseService {
 
         // ---- freeze catalog, stock, dispositions -----------------------
         freezeCatalog(releaseId, catalogLabel, inventoryLabel, effectiveFrom);
+
+        // ---- freeze substitution graph, lifecycle and warehouse facts ---
+        freezeSubstitutions(releaseId, catalogLabel, inventoryLabel);
 
         // ---- freeze adjudications -------------------------------------
         freezeAdjudications(releaseId);
@@ -380,6 +387,103 @@ public class ReleaseService {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Freeze the substitution graph, part lifecycle, historical work-order
+    // recommendations and warehouse stock contention. SNAPSHOT-mode advice
+    // must be reproducible from release_* rows alone.
+    // ------------------------------------------------------------------
+    private void freezeSubstitutions(UUID releaseId, String catalogLabel, String inventoryLabel) {
+        UUID cvId = ReferenceRepo.asUuid(ReferenceRepo.require(
+                catalog.catalogVersionByLabel(catalogLabel), "CATALOG_VERSION_NOT_FOUND",
+                "Unknown catalog version " + catalogLabel), "id");
+
+        List<SqlParameterSource> edgeBatch = new ArrayList<>();
+        for (Map<String, Object> s : substitutions.substitutionsForCatalog(cvId)) {
+            edgeBatch.add(new MapSqlParameterSource()
+                    .addValue("releaseId", releaseId)
+                    .addValue("fromPartNumber", ReferenceRepo.asString(s, "from_part_number"))
+                    .addValue("toPartNumber", ReferenceRepo.asString(s, "to_part_number"))
+                    .addValue("kind", ReferenceRepo.asString(s, "substitution_kind"))
+                    .addValue("modelCode", ReferenceRepo.asString(s, "model_code"))
+                    .addValue("tempMin", Sql.decimal(s.get("temp_min_c")))
+                    .addValue("tempMax", Sql.decimal(s.get("temp_max_c")))
+                    .addValue("interface", ReferenceRepo.asString(s, "interface_requirement"))
+                    .addValue("confirm", Boolean.TRUE.equals(s.get("requires_engineering_confirm")))
+                    .addValue("validFrom", Sql.odt(ReferenceRepo.asInstant(s, "valid_from")))
+                    .addValue("validTo", Sql.odt(ReferenceRepo.asInstant(s, "valid_to")))
+                    .addValue("state", ReferenceRepo.asString(s, "state"))
+                    .addValue("approvalRef", ReferenceRepo.asString(s, "approval_ref"))
+                    .addValue("approvedBy", ReferenceRepo.asString(s, "approved_by"))
+                    .addValue("approvedAt", Sql.odt(ReferenceRepo.asInstant(s, "approved_at")))
+                    .addValue("notes", ReferenceRepo.asString(s, "notes")));
+        }
+        if (!edgeBatch.isEmpty()) {
+            substitutions.insertReleaseSubstitutions(edgeBatch.toArray(new SqlParameterSource[0]));
+        }
+
+        List<SqlParameterSource> lifeBatch = new ArrayList<>();
+        for (Map<String, Object> l : substitutions.lifecycleForCatalog(cvId)) {
+            lifeBatch.add(new MapSqlParameterSource()
+                    .addValue("releaseId", releaseId)
+                    .addValue("partNumber", ReferenceRepo.asString(l, "part_number"))
+                    .addValue("state", ReferenceRepo.asString(l, "state"))
+                    .addValue("reason", ReferenceRepo.asString(l, "obsolete_reason"))
+                    .addValue("successor", ReferenceRepo.asString(l, "superseded_by_part_number"))
+                    .addValue("decidedAt", Sql.odt(ReferenceRepo.asInstant(l, "decided_at")))
+                    .addValue("approvedBy", ReferenceRepo.asString(l, "approved_by"))
+                    .addValue("approvalRef", ReferenceRepo.asString(l, "approval_ref")));
+        }
+        if (!lifeBatch.isEmpty()) {
+            substitutions.insertReleaseLifecycle(lifeBatch.toArray(new SqlParameterSource[0]));
+        }
+
+        // All historical recommendations are frozen: they are immutable facts
+        // independent of the release's catalog.
+        List<SqlParameterSource> recBatch = new ArrayList<>();
+        for (Map<String, Object> r : substitutions.allWorkOrderRecommendations()) {
+            recBatch.add(new MapSqlParameterSource()
+                    .addValue("releaseId", releaseId)
+                    .addValue("woExternalId", ReferenceRepo.asString(r, "work_order_external_id"))
+                    .addValue("conceptCode", ReferenceRepo.asString(r, "concept_code"))
+                    .addValue("partNumber", ReferenceRepo.asString(r, "part_number"))
+                    .addValue("dispositionCode", ReferenceRepo.asString(r, "disposition_code"))
+                    .addValue("catalogLabel", ReferenceRepo.asString(r, "catalog_version_label"))
+                    .addValue("quantity", ReferenceRepo.asInt(r, "quantity"))
+                    .addValue("status", ReferenceRepo.asString(r, "recommendation_status"))
+                    .addValue("reason", ReferenceRepo.asString(r, "reason"))
+                    .addValue("recordedAt", Sql.odt(ReferenceRepo.asInstant(r, "recorded_at")))
+                    .addValue("recordedBy", ReferenceRepo.asString(r, "recorded_by"))
+                    .addValue("approvalRef", ReferenceRepo.asString(r, "approval_ref")));
+        }
+        if (!recBatch.isEmpty()) {
+            substitutions.insertReleaseRecommendations(recBatch.toArray(new SqlParameterSource[0]));
+        }
+
+        // Stock contention at the release's inventory point.
+        if (inventoryLabel != null) {
+            Map<String, Object> snapshot = ReferenceRepo.require(
+                    catalog.inventorySnapshotByLabel(inventoryLabel), "INVENTORY_SNAPSHOT_NOT_FOUND",
+                    "Unknown inventory snapshot " + inventoryLabel);
+            List<SqlParameterSource> cBatch = new ArrayList<>();
+            for (Map<String, Object> c : substitutions.contentionsForSnapshot(
+                    ReferenceRepo.asUuid(snapshot, "id"))) {
+                cBatch.add(new MapSqlParameterSource()
+                        .addValue("releaseId", releaseId)
+                        .addValue("partNumber", ReferenceRepo.asString(c, "part_number"))
+                        .addValue("warehouse", ReferenceRepo.asString(c, "warehouse"))
+                        .addValue("status", ReferenceRepo.asString(c, "status"))
+                        .addValue("demand", ReferenceRepo.asString(c, "competing_demand"))
+                        .addValue("confirmedBy", ReferenceRepo.asString(c, "confirmed_by"))
+                        .addValue("confirmedAt", Sql.odt(ReferenceRepo.asInstant(c, "confirmed_at")))
+                        .addValue("notes", ReferenceRepo.asString(c, "notes"))
+                        .addValue("createdAt", Sql.odt(ReferenceRepo.asInstant(c, "created_at"))));
+            }
+            if (!cBatch.isEmpty()) {
+                substitutions.insertReleaseContentions(cBatch.toArray(new SqlParameterSource[0]));
+            }
+        }
+    }
+
     private void freezeAdjudications(UUID releaseId) {
         List<SqlParameterSource> batch = new ArrayList<>();
         for (Map<String, Object> adj : releases.allAdjudications()) {
@@ -427,6 +531,11 @@ public class ReleaseService {
             content.put("adjudications", canonical(releases.adjudications(releaseId)));
             content.put("codeEntries", canonical(releases.allCodeEntries(releaseId)));
             content.put("termEntries", canonical(releases.allTermEntries(releaseId)));
+            content.put("substitutions", canonical(substitutions.releaseSubstitutions(releaseId)));
+            content.put("partLifecycle", canonical(substitutions.releaseLifecycle(releaseId)));
+            content.put("workOrderRecommendations",
+                    canonical(substitutions.releaseRecommendations(releaseId)));
+            content.put("stockContentions", canonical(substitutions.releaseContentions(releaseId)));
             byte[] canonical = mapper.writer().with(
                     com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
                     .writeValueAsBytes(content);

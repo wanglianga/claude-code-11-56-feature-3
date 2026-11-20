@@ -89,6 +89,16 @@ public class ReferenceRepo {
                 """, Map.of("mc", manufacturerCode, "code", code), MAP).stream().findFirst();
     }
 
+    /** Resolve a model by its code alone (model codes are unique within the seeded fleet). */
+    public Optional<Map<String, Object>> modelByCodeOnly(String code) {
+        return jdbc.query("""
+                select m.*, man.code as manufacturer_code
+                from turbine_model m join manufacturer man on man.id = m.manufacturer_id
+                where m.code = :code
+                order by man.code limit 1
+                """, Map.of("code", code), MAP).stream().findFirst();
+    }
+
     // ---- firmware ------------------------------------------------------
     public UUID insertFirmware(UUID modelId, String version, int sequence, LocalDate releasedOn, String notes) {
         return jdbc.queryForObject("""

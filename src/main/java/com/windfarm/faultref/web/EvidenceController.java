@@ -3,6 +3,7 @@ package com.windfarm.faultref.web;
 import com.windfarm.faultref.repo.EvidenceRepo;
 import com.windfarm.faultref.repo.ReferenceRepo;
 import com.windfarm.faultref.service.EvidenceService;
+import com.windfarm.faultref.service.SubstitutionService;
 import com.windfarm.faultref.web.dto.ApiRequests;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -22,12 +23,14 @@ public class EvidenceController {
     private final EvidenceService evidenceService;
     private final EvidenceRepo evidenceRepo;
     private final ReferenceRepo reference;
+    private final SubstitutionService substitutionService;
 
     public EvidenceController(EvidenceService evidenceService, EvidenceRepo evidenceRepo,
-                              ReferenceRepo reference) {
+                              ReferenceRepo reference, SubstitutionService substitutionService) {
         this.evidenceService = evidenceService;
         this.evidenceRepo = evidenceRepo;
         this.reference = reference;
+        this.substitutionService = substitutionService;
     }
 
     @Operation(summary = "Ingest a controller alarm or a vendor-term alarm",
@@ -71,6 +74,7 @@ public class EvidenceController {
         if (termId != null) {
             out.put("term", reference.termById(termId).orElse(null));
         }
+        substitutionService.attachHistoricalRecommendations(List.of(out), null);
         return out;
     }
 }
